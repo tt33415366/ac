@@ -15,9 +15,12 @@
  #include <pthread.h>
 
  #include <netdb.h>
-
+#if 0
 #define DEBUG(fmt, ...) \
-	fprintf(stdout, "[ DEBUG ] [ %s:%u ] " fmt, __func__, __LINE__,  ##__VA_ARGS__))
+	fprintf(stdout, "[ DEBUG ] [ %s:%u ] " fmt, __func__, __LINE__,  ##__VA_ARGS__)
+#else
+#define DEBUG(fmt, ...)
+#endif
 #define INFO(fmt, ...) \
 	fprintf(stdout, "[ INFO ] " fmt, ##__VA_ARGS__)
 #define WARN(fmt, ...) \
@@ -150,6 +153,7 @@ static void set_conn_state(struct th_param *param, struct connection *conn, enum
 		case STAT_READ:
 			ev.data.ptr = conn;
 			conn->events = ev.events = events_by_state[state];
+			DEBUG("%s -> %d\n", oev ? "Modify" : "Add", conn->fd);
 			if (epoll_ctl(param->epoll_fd, oev ? EPOLL_CTL_MOD : EPOLL_CTL_ADD, conn->fd, &ev) < 0) {
 				ERROR("epoll_ctl() failed with %s\n", strerror(errno));
 				exit(-errno);
@@ -157,7 +161,9 @@ static void set_conn_state(struct th_param *param, struct connection *conn, enum
 			break;
 		case STAT_UNCONNECTED:
 			ev.data.ptr = conn;
-			conn->events = ev.events = events_by_state[state];
+			/* conn->events = ev.events = events_by_state[state]; */
+			ev.events = oev;
+			DEBUG("%s -> %d\n", "Del", conn->fd);
 			if (epoll_ctl(param->epoll_fd, EPOLL_CTL_DEL, conn->fd, &ev) < 0) {
 				ERROR("epoll_ctl() failed with %s\n", strerror(errno));
 				exit(-errno);
@@ -176,7 +182,8 @@ static void start_connection(struct th_param *param, struct connection *conn)
 	}
 	setfdnonblocking(conn->fd);
 	conn->begin_time = usec();
-	if (connect(conn->fd, &req.addr, req.addrlen) < 0) {
+	if (connect(conn->fd, &req.addr, req.addrlen) < 0 && (errno != EINPROGRESS)) {
+		WARN("connect() failed with %s\n", strerror(errno));
 		stop_connection(param, conn);
 		start_connection(param, conn);
 		return;
@@ -187,7 +194,7 @@ static void start_connection(struct th_param *param, struct connection *conn)
 
 static void stop_connection(struct th_param *param, struct connection *conn)
 {
-	if (!(conn->fd < 0)) {
+	if (conn->fd > 0) {
 		set_conn_state(param, conn, STAT_UNCONNECTED);
 		close(conn->fd);
 	}
@@ -209,7 +216,6 @@ static void write_requeset(struct th_param *param, struct connection *conn)
 		conn->rwrite = req.req_content_len;
 		conn->rwrote = 0;
 	}
-	
 	do {
 		int n = write(conn->fd, req.req_content + conn->rwrote, (conn->rwrite - conn->rwrote));
 		if (n < 0) {
@@ -221,7 +227,7 @@ static void write_requeset(struct th_param *param, struct connection *conn)
 			}
 		}
 		conn->rwrote += n;
-	} while (conn->rwrite == conn->rwrote);
+	} while (conn->rwrite > conn->rwrote);
 	/* Time to read */
 	set_conn_state(param, conn, STAT_READ);
 }
@@ -274,8 +280,8 @@ static void read_response(struct th_param *param, struct connection *conn)
 
 	memset(param->buff, 0x0, sizeof(param->buff));
 	n = read(conn->fd, param->buff, sizeof(param->buff));
-	if (n < 0) {
-		if (!(errno == EAGAIN)) {
+	if (n <= 0) {
+		if (!(errno == EAGAIN || errno == EINTR)) {
 			stop_connection(param, conn);
 		} else {
 			return;
@@ -315,9 +321,11 @@ static void *thread_loop(void *p)
 
 			if ((ev->events & EPOLLIN) || (ev->events & EPOLLPRI)) {
 				/* Ready for read */
+				DEBUG("Ready for reading\n");
 				read_response(param, conn);
 			} else if (ev->events & EPOLLOUT) {
 				/* Ready for write */
+				DEBUG("Ready for writing\n");
 				set_conn_state(param, conn, STAT_CONNECTED);
 				write_requeset(param, conn);
 			} else {
@@ -356,7 +364,7 @@ static char *strlendup(const char *src, int len)
 		memcpy(p, src, len);
 	}
 
-	return NULL;
+	return p;
 }
 
 static int parse_url(const char *url)
@@ -379,9 +387,11 @@ static int parse_url(const char *url)
 			req.host = strlendup(url, e - url);
 			strncpy(_port, e + 1, s - e);
 			port = atoi(_port);
-		} else {
-			req.host = strlendup(url, s -url);
 		}
+	}
+
+	if (!req.host) {
+		req.host = strlendup(url, s - url);
 	}
 			
 	req.path = strdup(s);
@@ -400,6 +410,7 @@ static int setup_addrinfo(void)
 	hints.ai_family = PF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
 
+	printf("%s , %s\n", req.host, port);
 	err = getaddrinfo(req.host, port, &hints, &res);
 	if (err) {
 		/* gai_strerror */
@@ -457,16 +468,16 @@ static int __main(int k, int t, int c, const char *url)
 	}
 	
 	for (i = 0; i < t; i++) {
-		params[i] = allocate_th_param(cc_per_thread, max_req_per_thread);
+		if (i == (t -1)) {
+			/* The last one */
+			params[i] = allocate_th_param(k -(cc_per_thread * i), c - (max_req_per_thread * i));
+		} else {
+			params[i] = allocate_th_param(cc_per_thread, max_req_per_thread);
+		}
 		if (!params[i]) {
 			ret = -ENOMEM;
 			ERROR("Out of memory...\n");
 			goto cleanup;
-		}
-		if (i == (t -1)) {
-			/* The last one */
-			 params[i]->max_req_count = c - (max_req_per_thread * i);
-			 params[i]->concurrent_count = k -(cc_per_thread * i);
 		}
 			
 		pthread_create(&params[i]->tid, NULL, &thread_loop, params[i]);
@@ -478,7 +489,7 @@ static int __main(int k, int t, int c, const char *url)
 		total_duration += params[i]->duration;
 	}
 	/* Output the report */
-	printf("The %s/%s completed with %f connections per second\n", req.host, req.path, 
+	printf("The %s%s completed with %f connections per second\n", req.host, req.path, 
 		((float)(c * 1000000) / total_duration));
 	
 cleanup:
@@ -531,6 +542,17 @@ cleanup:
 				usage(argv[0]);
 				exit(EXIT_FAILURE);
 		}
+	}
+
+	if (c < k) {
+		ERROR("Concurrent reqest count(%d) cannot be larger than total request count(%d)\n", 
+				k, c);
+		exit(EXIT_FAILURE);
+	}
+	if (k < t) {
+		ERROR("Concurrent request count(%d) cannot be less than the running thread number(%d)\n", 
+				k, t);
+		exit(EXIT_FAILURE);
 	}
 	if (optind != (argc -1)) {
 		usage(argv[0]);
