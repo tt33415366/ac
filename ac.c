@@ -196,6 +196,8 @@ static void stop_connection(struct th_param *param, struct connection *conn)
 {
 	if (conn->fd > 0) {
 		set_conn_state(param, conn, STAT_UNCONNECTED);
+		/* Expected a faster shutdown */
+		/* shutdown(conn->fd, SHUT_RDWR); */
 		close(conn->fd);
 	}
 	conn->end_time = usec();
@@ -280,13 +282,17 @@ static void read_response(struct th_param *param, struct connection *conn)
 
 	memset(param->buff, 0x0, sizeof(param->buff));
 	n = read(conn->fd, param->buff, sizeof(param->buff));
-	if (n <= 0) {
-		if (!(errno == EAGAIN || errno == EINTR)) {
-			stop_connection(param, conn);
-		} else {
+	if (n < 0) {
+		if ((errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK)) {
 			return;
 		}
+		stop_connection(param, conn);
+		return;
+	} else if (n == 0) {
+		stop_connection(param, conn);
+		return;
 	}
+	
 	if (parse_header(conn, param->buff, n) < 0) {
 		stop_connection(param, conn);
 		return;
