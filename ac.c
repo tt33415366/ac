@@ -202,7 +202,6 @@ static void stop_connection(struct th_param *param, struct connection *conn)
 	}
 	conn->end_time = usec();
 	if (conn->read) {
-		param->duration += conn->end_time - conn->begin_time;
 		param->done++;
 	}
 	/* Make it ready for reuse */
@@ -304,6 +303,7 @@ static void *thread_loop(void *p)
 {
 	struct th_param *param = (struct th_param *)p;
 	int i;
+	unsigned long begin;
 	
 	/* In case we also wanna try fork in the futrure */
 	param->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
@@ -314,6 +314,7 @@ static void *thread_loop(void *p)
 		return NULL;
 	}
 
+	begin = usec();
 	for (i = 0; i < param->concurrent_count; i++) {
 		start_connection(param, &param->connections[i]);
 	}
@@ -341,7 +342,7 @@ static void *thread_loop(void *p)
 			}
 		}
 	} while (param->done < param->max_req_count);
-	
+	param->duration = usec() - begin;
 
 	return NULL;
 }
@@ -495,8 +496,8 @@ static int __main(int k, int t, int c, const char *url)
 		total_duration += params[i]->duration;
 	}
 	/* Output the report */
-	printf("The %s%s completed with %f connections per second\n", req.host, req.path, 
-		((float)(c * 1000000) / total_duration));
+	printf("The %s%s completed with %f connections per second [ mean ]\n", req.host, req.path, 
+		((float)(c * 1000000) / (total_duration / t));
 	
 cleanup:
 	if (req.host) {
