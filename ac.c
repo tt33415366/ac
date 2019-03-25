@@ -11,6 +11,7 @@
  #include <sys/epoll.h>
  #include <sys/types.h> 
  #include <sys/socket.h>
+ #include <assert.h>
 
  #include <pthread.h>
 
@@ -53,7 +54,7 @@ enum conn_state {
 	int epoll_fd;
 	struct epoll_event *epoll_events;
 	int started, done;			/* The number of connections that we have done */
-	unsigned long duration; 			/* Sum of (end_time - begin_time) */
+	unsigned long long duration; 			/* Sum of (end_time - begin_time) */
  	int max_req_count;
 	int concurrent_count;
  	char buff[8192];
@@ -174,6 +175,11 @@ static void set_conn_state(struct th_param *param, struct connection *conn, enum
 
 static void start_connection(struct th_param *param, struct connection *conn)
 {
+	if (param->started >= param->max_req_count) {
+		return ;
+	}
+
+	assert(conn->fd == 0);
 	conn->fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (conn->fd < 0) {
 		/* Out of socket ? */
@@ -206,9 +212,7 @@ static void stop_connection(struct th_param *param, struct connection *conn)
 	}
 	/* Make it ready for reuse */
 	memset(conn, 0x0, sizeof(*conn));
-	if (param->started < param->max_req_count); {
-		start_connection(param, conn);
-	}
+	start_connection(param, conn);
 }
 
 static void write_requeset(struct th_param *param, struct connection *conn)
@@ -306,7 +310,7 @@ static void *thread_loop(void *p)
 	unsigned long begin;
 	
 	/* In case we also wanna try fork in the futrure */
-	param->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+	param->epoll_fd = epoll_create(/* EPOLL_CLOEXEC */ 2048);
 	if ((param->epoll_fd < 0) && (errno == EINVAL || errno == ENOSYS)) {
 		param->epoll_fd = epoll_create(1024);
 	}
@@ -320,7 +324,8 @@ static void *thread_loop(void *p)
 	}
 
 	do {
-		int nevent = epoll_wait(param->epoll_fd, param->epoll_events, param->concurrent_count, -1);
+		int nevent = epoll_wait(param->epoll_fd, param->epoll_events, 
+						param->concurrent_count, -1);
 
 		for (i = 0; i < nevent; i++) {
 			struct epoll_event *ev = &param->epoll_events[i];
@@ -342,7 +347,10 @@ static void *thread_loop(void *p)
 			}
 		}
 	} while (param->done < param->max_req_count);
+	close(param->epoll_fd);
+
 	param->duration = usec() - begin;
+	printf("%f - %ld\n", (float)param->max_req_count * 1000000/ param->duration, param->duration);
 
 	return NULL;
 }
@@ -430,8 +438,10 @@ static int setup_addrinfo(void)
 		if (fd < 0) 
 			continue;
 		if (connect(fd, r->ai_addr, r->ai_addrlen) < 0) {
+			close(fd);
 			continue;
 		}
+		close(fd);
 		break;
 	}
 	
@@ -452,10 +462,11 @@ static int setup_addrinfo(void)
 static int __main(int k, int t, int c, const char *url)
 {
 	int i, ret = 0;
-	unsigned long total_duration;
+	float m;
+	unsigned long long total_duration;
 	int cc_per_thread = k / t;
 	int max_req_per_thread = c / t;
-	struct th_param **params = (struct th_param **)calloc(t, sizeof(*params));
+	struct th_param **params /* = (struct th_param **)calloc(t, sizeof(*params)) */;
 
 	if (parse_url(url) < 0) {
 		ERROR("parse_url failed\n");
@@ -491,13 +502,15 @@ static int __main(int k, int t, int c, const char *url)
 	}
 
 	total_duration = 0;
+	m = 0.0;
 	for (i = 0; i < t; i++) {
 		pthread_join(params[i]->tid, NULL);
 		total_duration += params[i]->duration;
+		m += (float)params[i]->max_req_count * 1000000/ params[i]->duration;
 	}
 	/* Output the report */
-	printf("The %s%s completed with %f connections per second [ mean ]\n", req.host, req.path, 
-		((float)(c * 1000000) / (total_duration / t));
+	printf("The %s%s completed with %f(%f) connections per second [ mean ]\n", req.host, req.path, 
+		((float)(c * 1000000) / (total_duration / t)), m / t);
 	
 cleanup:
 	if (req.host) {
