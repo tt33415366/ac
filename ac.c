@@ -310,7 +310,7 @@ static void *thread_loop(void *p)
 	unsigned long begin;
 	
 	/* In case we also wanna try fork in the futrure */
-	param->epoll_fd = epoll_create(/* EPOLL_CLOEXEC */ 2048);
+	param->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if ((param->epoll_fd < 0) && (errno == EINVAL || errno == ENOSYS)) {
 		param->epoll_fd = epoll_create(1024);
 	}
