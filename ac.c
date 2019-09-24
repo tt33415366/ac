@@ -147,6 +147,7 @@ static void set_conn_state(struct th_param *param, struct connection *conn, enum
 		EPOLLIN
 	};
 
+	assert(conn->begin_time != 0);
 	conn->state = state;
 	switch (state) {
 		case STAT_CONNECTING:
@@ -200,7 +201,7 @@ static void start_connection(struct th_param *param, struct connection *conn)
 
 static void stop_connection(struct th_param *param, struct connection *conn)
 {
-	if (conn->fd > 0) {
+	if (!(conn->fd < 0)) {
 		set_conn_state(param, conn, STAT_UNCONNECTED);
 		/* Expected a faster shutdown */
 		/* shutdown(conn->fd, SHUT_RDWR); */
@@ -209,6 +210,8 @@ static void stop_connection(struct th_param *param, struct connection *conn)
 	conn->end_time = usec();
 	if (conn->read) {
 		param->done++;
+	} else {
+		param->started--;
 	}
 	/* Make it ready for reuse */
 	memset(conn, 0x0, sizeof(*conn));
@@ -325,7 +328,7 @@ static void *thread_loop(void *p)
 
 	do {
 		int nevent = epoll_wait(param->epoll_fd, param->epoll_events, 
-						param->concurrent_count, -1);
+						param->concurrent_count, 30 * 1000);
 
 		for (i = 0; i < nevent; i++) {
 			struct epoll_event *ev = &param->epoll_events[i];
@@ -346,6 +349,19 @@ static void *thread_loop(void *p)
 				stop_connection(param , conn);
 			}
 		}
+		if (nevent == 0) {
+			/* Timeout */
+			for (i = 0; i < param->concurrent_count; i++) {
+				struct connection *conn = &param->connections[i];
+				extern long long int llabs(long long int j);
+
+				if (conn && conn->begin_time && (llabs(usec() - conn->begin_time) > 30 * 1000000)) {
+					printf("[ Timeout ] Stopping...(%u, %d)\n", conn->read, conn->fd);
+					stop_connection(param , conn);
+				}
+			}
+		}
+		memset(param->epoll_events, 0, param->concurrent_count * sizeof(param->epoll_events));
 	} while (param->done < param->max_req_count);
 	close(param->epoll_fd);
 
