@@ -209,6 +209,9 @@ static void stop_connection(struct th_param *param, struct connection *conn)
 	conn->end_time = usec();
 	if (conn->read) {
 		param->done++;
+	} else {
+		/* Try again */
+		param->started--;
 	}
 	/* Make it ready for reuse */
 	memset(conn, 0x0, sizeof(*conn));
