@@ -47,6 +47,9 @@ enum conn_state {
 	char cbuff[4096];
 	unsigned long begin_time;
 	unsigned long end_time;
+	unsigned long connect,
+				endwrite,
+				beginread;
  };
  
  struct th_param {
@@ -220,23 +223,31 @@ static void stop_connection(struct th_param *param, struct connection *conn)
 
 static void write_requeset(struct th_param *param, struct connection *conn)
 {
-	if (!conn->rwrite) {
-		conn->rwrite = req.req_content_len;
-		conn->rwrote = 0;
-	}
+
 	do {
+		if (!conn->rwrite) {
+			conn->rwrite = req.req_content_len;
+			conn->rwrote = 0;
+			conn->connect = usec();
+		} else if (usec() > (conn->rwrite + 30 * 1000000)) {
+			WARN("Send request timed out\n");
+			stop_connection(param, conn);
+			return ;
+		}
 		int n = write(conn->fd, req.req_content + conn->rwrote, (conn->rwrite - conn->rwrote));
 		if (n < 0) {
 			if (errno == EAGAIN) {
 				/* Silently try again at a later time */
-				return;
+				set_conn_state(param, conn, STAT_CONNECTING);
 			} else {
 				stop_connection(param, conn);
 			}
+			return;
 		}
 		conn->rwrote += n;
 	} while (conn->rwrite > conn->rwrote);
 	/* Time to read */
+	conn->endwrite = usec();
 	set_conn_state(param, conn, STAT_READ);
 }
 
@@ -303,6 +314,7 @@ static void read_response(struct th_param *param, struct connection *conn)
 		stop_connection(param, conn);
 		return;
 	}
+	conn->beginread = usec();
 	conn->read += n;
 }
 
